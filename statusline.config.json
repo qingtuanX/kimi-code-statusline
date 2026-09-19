@@ -1,0 +1,15 @@
+{
+  "_readme": "Config for statusline.js / statusline-refresh.js (footer under the input box).",
+  "_segments": "Footer line, pieces joined by '  ·  '. Any of: model, mode, cwd, git, cost, balance. Reorder or remove freely.",
+  "_prices": "Model prices in CNY per 1M tokens. '_default' applies to models not listed. cache_hit = prompt cache read, cache_miss = uncached input, output = completion tokens.",
+  "currency": "¥",
+  "balance_refresh_seconds": 90,
+  "segments": ["model", "cost", "balance"],
+  "prices_per_million_tokens": {
+    "_default": { "cache_hit": 0.2, "cache_miss": 2.0, "output": 3.0 },
+    "deepseek/deepseek-flash": { "cache_hit": 0.2, "cache_miss": 2.0, "output": 3.0 },
+    "deepseek/deepseek-v4-flash": { "cache_hit": 0.2, "cache_miss": 2.0, "output": 3.0 },
+    "deepseek/deepseek-v4-pro": { "cache_hit": 0.2, "cache_miss": 2.0, "output": 3.0 },
+    "deepseek/deepseek-v4-flash-vision-exp": { "cache_hit": 0.2, "cache_miss": 2.0, "output": 3.0 }
+  }
+}
