@@ -6,6 +6,11 @@
 // Renders one line under the input box:
 //   <this session cost>  |  <provider key balance>
 //
+// The cost is read only from wire files that belong to the sessionId in the
+// payload. Before a session exists (the host sends no sessionId at startup)
+// there is nothing to attribute, so the cost renders as "--" — never as some
+// other session's total.
+//
 // kimi-code runs this command at most once per second and kills it after
 // 300 ms, so this script must stay fast: it only touches local files and
 // prints. The balance API call happens in statusline-refresh.js, spawned
@@ -87,67 +92,53 @@ function listAgentWireFiles(sessionDir) {
   return out;
 }
 
-function resolveWireFiles(sessionId, cwd) {
-  if (sessionId) {
-    let wdDirs;
-    try {
-      wdDirs = fs.readdirSync(SESSIONS_DIR, { withFileTypes: true });
-    } catch {
-      return [];
-    }
-    for (const wd of wdDirs) {
-      if (!wd.isDirectory() || !wd.name.startsWith("wd_")) continue;
-      const wdPath = path.join(SESSIONS_DIR, wd.name);
-      let sessions;
-      try {
-        sessions = fs.readdirSync(wdPath, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-      for (const s of sessions) {
-        if (!s.isDirectory()) continue;
-        const matches =
-          s.name === sessionId ||
-          s.name === `session_${sessionId}` ||
-          s.name.endsWith(sessionId) ||
-          sessionId.endsWith(s.name);
-        if (matches) return listAgentWireFiles(path.join(wdPath, s.name));
-      }
-    }
-  }
-  // Fallback: newest non-archived session in the reported cwd.
-  if (!cwd) return [];
-  let best = null;
-  let bestAt = -1;
-  let wdDirs = [];
+const SESSION_ID_PREFIX = "session_";
+
+function sessionIdKey(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  return trimmed.startsWith(SESSION_ID_PREFIX) ? trimmed.slice(SESSION_ID_PREFIX.length) : trimmed;
+}
+
+// Wire files for this session and no other. Resolving the session by cwd or by
+// recency would attribute a neighbouring session's usage to the one on screen,
+// which is exactly what the footer must not do.
+function resolveWireFiles(sessionId) {
+  const want = sessionIdKey(sessionId);
+  if (want === null) return [];
+  let wdDirs;
   try {
     wdDirs = fs.readdirSync(SESSIONS_DIR, { withFileTypes: true });
   } catch {
     return [];
   }
+  let best = null;
+  let bestAt = -1;
   for (const wd of wdDirs) {
     if (!wd.isDirectory() || !wd.name.startsWith("wd_")) continue;
     const wdPath = path.join(SESSIONS_DIR, wd.name);
-    let sessions = [];
+    let sessions;
     try {
       sessions = fs.readdirSync(wdPath, { withFileTypes: true });
     } catch {
       continue;
     }
     for (const s of sessions) {
-      if (!s.isDirectory() || !s.name.startsWith("session_")) continue;
-      const statePath = path.join(wdPath, s.name, "state.json");
-      const state = readJson(statePath, null);
-      if (!state || state.archived === true) continue;
-      if (cwd && state.cwd && path.resolve(state.cwd) !== path.resolve(cwd)) continue;
-      const at = typeof state.updatedAt === "number" ? state.updatedAt : 0;
+      if (!s.isDirectory() || !s.name.startsWith(SESSION_ID_PREFIX)) continue;
+      if (sessionIdKey(s.name) !== want) continue;
+      const dir = path.join(wdPath, s.name);
+      let at = -1;
+      try {
+        at = fs.statSync(dir).mtimeMs;
+      } catch {}
       if (at > bestAt) {
         bestAt = at;
-        best = path.join(wdPath, s.name);
+        best = dir;
       }
     }
   }
-  return best ? listAgentWireFiles(best) : [];
+  return best === null ? [] : listAgentWireFiles(best);
 }
 
 function scanWireFile(file, prev) {
@@ -203,10 +194,16 @@ function scanWireFile(file, prev) {
   return { offset: offset + consumed, byModel };
 }
 
-function sessionCost(sessionId, cwd, config) {
-  const files = resolveWireFiles(sessionId, cwd);
+function sessionCost(sessionId, config) {
+  const key = sessionIdKey(sessionId);
+  const files = resolveWireFiles(sessionId);
+  if (key === null || files.length === 0) {
+    // No session yet, or its wire file is not on disk: the cost is unknown —
+    // not zero, and not whatever ran in this directory earlier.
+    return { byModel: {}, total: null, resolved: false };
+  }
   const cache = readJson(COST_CACHE, null);
-  const sameSession = cache && cache.sessionId === (sessionId ?? null);
+  const sameSession = cache !== null && sessionIdKey(cache.sessionId) === key;
   const fileStates = sameSession && cache.files && typeof cache.files === "object" ? cache.files : {};
   const present = new Set();
   const byModel = {};
@@ -216,16 +213,14 @@ function sessionCost(sessionId, cwd, config) {
     fileStates[file] = state;
     for (const [model, counts] of Object.entries(state.byModel)) {
       const acc = byModel[model] || (byModel[model] = emptyCounts());
-      for (const key of USAGE_KEYS) acc[key] += counts[key] || 0;
+      for (const usageKey of USAGE_KEYS) acc[usageKey] += counts[usageKey] || 0;
     }
   }
   for (const file of Object.keys(fileStates)) {
     if (!present.has(file)) delete fileStates[file];
   }
-  if (files.length > 0) {
-    writeJsonAtomic(COST_CACHE, { sessionId: sessionId ?? null, at: Date.now(), files: fileStates });
-  }
-  return { byModel, total: priceUsage(byModel, config) };
+  writeJsonAtomic(COST_CACHE, { sessionId: key, at: Date.now(), files: fileStates });
+  return { byModel, total: priceUsage(byModel, config), resolved: true };
 }
 
 function priceUsage(byModel, config) {
@@ -311,7 +306,7 @@ function renderLine(payload, config, cost, symbol) {
         break;
       }
       case "cost": {
-        parts.push(`本次会话 ${symbol}${formatMoney(cost.total)}`);
+        parts.push(cost.resolved ? `本次会话 ${symbol}${formatMoney(cost.total)}` : "本次会话 --");
         break;
       }
       case "balance": {
@@ -376,11 +371,7 @@ function main() {
 
   const config = readJson(CONFIG_FILE, DEFAULT_CONFIG);
   const symbol = typeof config.currency === "string" && config.currency.length > 0 ? config.currency : DEFAULT_CONFIG.currency;
-  const cost = sessionCost(
-    typeof payload.sessionId === "string" ? payload.sessionId : null,
-    typeof payload.cwd === "string" ? payload.cwd : null,
-    config,
-  );
+  const cost = sessionCost(typeof payload.sessionId === "string" ? payload.sessionId : null, config);
 
   const line = renderLine(payload, config, cost, symbol);
   requestBalanceRefresh(config);

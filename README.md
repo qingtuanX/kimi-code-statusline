@@ -57,8 +57,9 @@ kimi-code 会以子进程运行 `status_line.command`：把 JSON 快照写到 st
 因此本方案：
 
 1. `statusline.js` 在 300ms 内只做本地文件 IO 并输出一行（实测约 90ms）
-2. 花费 = 会话目录 `agents/*/wire.jsonl` 中 `usage.record` 事件累计的 token 数 × 单价；
-   采用增量读取（记录文件偏移），不重复扫全量日志
+2. 花费 = **本会话**目录 `agents/*/wire.jsonl` 中 `usage.record` 事件累计的 token 数 × 单价；
+   采用增量读取（记录文件偏移），不重复扫全量日志。花费严格按 payload 里的 `sessionId` 归属：
+   解析不到对应会话时显示 `--`，绝不拿"同目录最近一个会话"的数字顶替
 3. 余额查询放进后台进程 `statusline-refresh.js`（网络请求塞不进 300ms 预算），
    结果写到 `statusline-cache/balance.json`；前台只读缓存
 4. 刷新失败时保留上一次的余额并标 `*`；查询成功后自动恢复
@@ -69,6 +70,7 @@ kimi-code 会以子进程运行 `status_line.command`：把 JSON 快照写到 st
 ## 已知限制
 
 - 花费是**估算**：按 `statusline.config.json` 里的单价计算，单价与实际不符则数字不准
+- 启动瞬间还没有会话、或 `sessionId` 对应的会话文件不可读时，花费显示 `--`（宁缺勿错，不猜其他会话）
 - 余额接口目前只对接 DeepSeek 风格的 `/user/balance`；其他 provider 可自行修改 `statusline-refresh.js`
 - footer 第一行会**整行替换**内置槽位（model / cwd / git / mode），所以默认把 `model` 放进 `segments` 里补回来
 
@@ -82,6 +84,8 @@ DeepSeek V4.1 Flash  ·  session ¥1.17  ·  key balance ¥16.40
 
 - Session cost is computed from the session's own `wire.jsonl` usage records × configurable per-model
   prices (incremental scan, ~90 ms per refresh, well under the 300 ms budget kimi-code allows).
+- Cost is attributed strictly by the payload's `sessionId`; when the session cannot be resolved yet
+  (e.g. right at startup) it renders `--` instead of borrowing another session's total.
 - Balance is fetched from the provider's OpenAI-compatible balance endpoint (DeepSeek `/user/balance`)
   by a detached background process; the foreground script only reads a cache file.
 - Install: drop the files into `~/.kimi-code/`, add a `[status_line] command` pointing at
