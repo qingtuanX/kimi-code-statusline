@@ -35,17 +35,26 @@ DeepSeek V4.1 Flash  ·  本次会话 ¥1.17  ·  key 余额 ¥16.40
 ```jsonc
 {
   "currency": "¥",                 // 显示符号
+  "usd_to_cny": 7.1,               // 官方价目表是美元，按这个汇率换算
   "balance_refresh_seconds": 90,   // 余额后台刷新间隔
   "segments": ["model", "cost", "balance"],   // footer 行内容与顺序
-  "prices_per_million_tokens": {   // 每百万 token 单价（默认按 DeepSeek 公开标准价）
-    "_default": { "cache_hit": 0.2, "cache_miss": 2.0, "output": 3.0 },
-    "deepseek/deepseek-flash": { "cache_hit": 0.2, "cache_miss": 2.0, "output": 3.0 }
+  "prices_per_million_tokens_usd": {   // 每百万 token 单价（USD，分峰时/谷时）
+    "_default": {
+      "peak":     { "cache_hit": 0.006, "cache_miss": 0.3,  "output": 1.2 },
+      "off_peak": { "cache_hit": 0.003, "cache_miss": 0.15, "output": 0.6 }
+    }
   }
 }
 ```
 
 - 单价的 key 是会话里记录的模型名（如 `deepseek/deepseek-flash`），没列出的模型用 `_default`
+- **每条 `usage.record` 按它自己的时间戳**决定用峰时还是谷时单价（不是按脚本运行时刻），
+  这样跨时段的长会话不会被整段按同一个价算；峰时 = UTC 周一至周五 01:00–04:00 与 06:00–10:00
+  （中国法定节假日算谷时，这里未建模）
 - `cache_hit` = 缓存命中的输入，`cache_miss` = 未命中的输入，`output` = 输出
+- 改动这张价目表会让增量缓存自动失效并全量重算，不会把新旧单价混在一起
+- 内置默认值按 DeepSeek 官方[价目表](https://api-docs.deepseek.com/quick_start/pricing)填写
+  （`deepseek-flash` / `deepseek-v4-pro`，2026-09-21 核对）
 
 ## 原理
 

@@ -11,6 +11,13 @@
 // there is nothing to attribute, so the cost renders as "--" — never as some
 // other session's total.
 //
+// Every usage.record carries its own timestamp, so each record is priced with
+// the provider rate that was in force at that moment (peak/off-peak), not with
+// whatever the clock says when this script happens to run. Prices live in
+// statusline.config.json as USD per 1M tokens plus a "usd_to_cny" conversion;
+// editing the price table changes its fingerprint and the incremental cache is
+// rebuilt instead of mixing old and new rates.
+//
 // kimi-code runs this command at most once per second and kills it after
 // 300 ms, so this script must stay fast: it only touches local files and
 // prints. The balance API call happens in statusline-refresh.js, spawned
@@ -34,13 +41,20 @@ const FIRST_PAYLOAD_FILE = path.join(CACHE_DIR, "first-payload.json");
 const USAGE_KEYS = ["inputOther", "output", "inputCacheRead", "inputCacheCreation"];
 const LOCK_TTL_MS = 30_000;
 const BALANCE_STALE_MS = 10 * 60_000;
+const TEMP_FILE_TTL_MS = 5 * 60_000;
 
+// DeepSeek deepseek-flash / deepseek-v4-pro, USD per 1M tokens.
+// Off-peak is half of peak; peak is 01:00-04:00 and 06:00-10:00 UTC, Mon-Fri.
 const DEFAULT_CONFIG = {
   currency: "¥",
+  usd_to_cny: 7.1,
   balance_refresh_seconds: 90,
   segments: ["model", "cost", "balance"],
-  prices_per_million_tokens: {
-    _default: { cache_hit: 0.2, cache_miss: 2, output: 3 },
+  prices_per_million_tokens_usd: {
+    _default: {
+      peak: { cache_hit: 0.006, cache_miss: 0.3, output: 1.2 },
+      off_peak: { cache_hit: 0.003, cache_miss: 0.15, output: 0.6 },
+    },
   },
 };
 
@@ -52,17 +66,37 @@ function readJson(file, fallback) {
   }
 }
 
-function writeJsonAtomic(file, value) {
+function cleanupStaleTempFiles(file) {
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = `${file}.tmp-${String(process.pid)}`;
-    fs.writeFileSync(tmp, JSON.stringify(value));
-    fs.renameSync(tmp, file);
+    const dir = path.dirname(file);
+    const prefix = `${path.basename(file)}.tmp-`;
+    const now = Date.now();
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.startsWith(prefix)) continue;
+      const full = path.join(dir, name);
+      try {
+        if (now - fs.statSync(full).mtimeMs > TEMP_FILE_TTL_MS) fs.unlinkSync(full);
+      } catch {}
+    }
   } catch {}
 }
 
+function writeJsonAtomic(file, value) {
+  const tmp = `${file}.tmp-${String(process.pid)}`;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(value));
+    fs.renameSync(tmp, file);
+  } catch {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {}
+  }
+  cleanupStaleTempFiles(file);
+}
+
 function emptyCounts() {
-  return { inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 0 };
+  return { inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 0, costUsd: 0 };
 }
 
 function readStdin() {
@@ -141,7 +175,58 @@ function resolveWireFiles(sessionId) {
   return best === null ? [] : listAgentWireFiles(best);
 }
 
-function scanWireFile(file, prev) {
+// Peak windows are UTC Monday-Friday; Chinese public holidays are off-peak too
+// but are not modelled here.
+function isPeakHourUtc(timeMs) {
+  const t = new Date(typeof timeMs === "number" && Number.isFinite(timeMs) ? timeMs : Date.now());
+  const day = t.getUTCDay();
+  if (day === 0 || day === 6) return false;
+  const hour = t.getUTCHours() + t.getUTCMinutes() / 60;
+  return (hour >= 1 && hour < 4) || (hour >= 6 && hour < 10);
+}
+
+function priceTableFor(model, config) {
+  const table =
+    config && config.prices_per_million_tokens_usd && typeof config.prices_per_million_tokens_usd === "object"
+      ? config.prices_per_million_tokens_usd
+      : DEFAULT_CONFIG.prices_per_million_tokens_usd;
+  const fallback = table._default && typeof table._default === "object" ? table._default : {};
+  return table[model] && typeof table[model] === "object" ? table[model] : fallback;
+}
+
+function ratesFor(priceTable, timeMs) {
+  const peak = isPeakHourUtc(timeMs);
+  const wanted = peak ? priceTable.peak : priceTable.off_peak;
+  const other = peak ? priceTable.off_peak : priceTable.peak;
+  return wanted || other || {};
+}
+
+function recordCostUsd(usage, rates) {
+  const hit = num(rates.cache_hit);
+  const miss = num(rates.cache_miss);
+  const out = num(rates.output);
+  const creation = num(rates.cache_creation) || miss;
+  return (
+    (num(usage.inputOther) * miss +
+      num(usage.inputCacheRead) * hit +
+      num(usage.inputCacheCreation) * creation +
+      num(usage.output) * out) /
+    1e6
+  );
+}
+
+// Changing the price table must not blend new rates into cached old totals.
+function priceFingerprint(config) {
+  const table =
+    config && config.prices_per_million_tokens_usd ? config.prices_per_million_tokens_usd : DEFAULT_CONFIG.prices_per_million_tokens_usd;
+  try {
+    return JSON.stringify(table);
+  } catch {
+    return "";
+  }
+}
+
+function scanWireFile(file, prev, config) {
   const fresh = { offset: 0, byModel: {} };
   let size;
   try {
@@ -189,6 +274,8 @@ function scanWireFile(file, prev) {
       const value = usage[key];
       if (typeof value === "number" && Number.isFinite(value)) acc[key] += value;
     }
+    const rates = ratesFor(priceTableFor(model, config), rec.time);
+    acc.costUsd += recordCostUsd(usage, rates);
   }
   const consumed = Buffer.byteLength(text.slice(0, lastNewline + 1), "utf8");
   return { offset: offset + consumed, byModel };
@@ -202,44 +289,37 @@ function sessionCost(sessionId, config) {
     // not zero, and not whatever ran in this directory earlier.
     return { byModel: {}, total: null, resolved: false };
   }
+  const fingerprint = priceFingerprint(config);
   const cache = readJson(COST_CACHE, null);
-  const sameSession = cache !== null && sessionIdKey(cache.sessionId) === key;
+  const sameSession =
+    cache !== null && sessionIdKey(cache.sessionId) === key && typeof cache.prices === "string" && cache.prices === fingerprint;
   const fileStates = sameSession && cache.files && typeof cache.files === "object" ? cache.files : {};
   const present = new Set();
   const byModel = {};
   for (const file of files) {
     present.add(file);
-    const state = scanWireFile(file, fileStates[file] ?? null);
+    const state = scanWireFile(file, fileStates[file] ?? null, config);
     fileStates[file] = state;
     for (const [model, counts] of Object.entries(state.byModel)) {
       const acc = byModel[model] || (byModel[model] = emptyCounts());
       for (const usageKey of USAGE_KEYS) acc[usageKey] += counts[usageKey] || 0;
+      acc.costUsd += counts.costUsd || 0;
     }
   }
   for (const file of Object.keys(fileStates)) {
     if (!present.has(file)) delete fileStates[file];
   }
-  writeJsonAtomic(COST_CACHE, { sessionId: key, at: Date.now(), files: fileStates });
-  return { byModel, total: priceUsage(byModel, config), resolved: true };
+  writeJsonAtomic(COST_CACHE, { sessionId: key, at: Date.now(), prices: fingerprint, files: fileStates });
+  return { byModel, total: totalCostCny(byModel, config), resolved: true };
 }
 
-function priceUsage(byModel, config) {
-  const table =
-    config && config.prices_per_million_tokens && typeof config.prices_per_million_tokens === "object"
-      ? config.prices_per_million_tokens
-      : DEFAULT_CONFIG.prices_per_million_tokens;
-  const fallback = table._default && typeof table._default === "object" ? table._default : { cache_hit: 0, cache_miss: 0, output: 0 };
-  let total = 0;
-  for (const [model, counts] of Object.entries(byModel)) {
-    const price = table[model] && typeof table[model] === "object" ? table[model] : fallback;
-    const miss = num(price.cache_miss);
-    const hit = num(price.cache_hit);
-    const out = num(price.output);
-    const creation = num(price.cache_creation) || miss;
-    total +=
-      (counts.inputOther * miss + counts.inputCacheRead * hit + counts.inputCacheCreation * creation + counts.output * out) / 1e6;
-  }
-  return total;
+// The USD total is converted at render time, so a rate change needs no re-scan.
+function totalCostCny(byModel, config) {
+  const configured = num(config && config.usd_to_cny);
+  const rate = configured > 0 ? configured : num(DEFAULT_CONFIG.usd_to_cny) || 1;
+  let usd = 0;
+  for (const counts of Object.values(byModel)) usd += num(counts.costUsd);
+  return usd * rate;
 }
 
 function num(value) {
@@ -251,7 +331,6 @@ function formatMoney(value) {
   const abs = Math.abs(value);
   if (abs >= 100) return value.toFixed(1);
   if (abs >= 1) return value.toFixed(2);
-  if (abs === 0) return "0.00";
   if (abs >= 0.01) return value.toFixed(3);
   return value.toFixed(4);
 }

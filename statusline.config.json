@@ -1,15 +1,32 @@
 {
   "_readme": "Config for statusline.js / statusline-refresh.js (footer under the input box).",
   "_segments": "Footer line, pieces joined by '  ·  '. Any of: model, mode, cwd, git, cost, balance. Reorder or remove freely.",
-  "_prices": "Model prices in CNY per 1M tokens. '_default' applies to models not listed. cache_hit = prompt cache read, cache_miss = uncached input, output = completion tokens.",
+  "_prices": "Prices in USD per 1M tokens, split into the provider's peak and off_peak windows. Each usage record is priced with the window in force at its own timestamp, then converted with usd_to_cny. cache_hit = prompt cache read, cache_miss = uncached input, output = completion tokens. Editing this table invalidates the incremental cost cache, so totals are recomputed instead of mixed.",
+  "_prices_source": "https://api-docs.deepseek.com/quick_start/pricing - deepseek-flash & deepseek-v4-pro, peak = 01:00-04:00 and 06:00-10:00 UTC Mon-Fri (off-peak is half of peak), checked 2026-09-21. Legacy names deepseek-v4-flash / deepseek-v4-flash-vision-exp are still billed at the Flash price.",
   "currency": "¥",
+  "usd_to_cny": 7.1,
   "balance_refresh_seconds": 90,
   "segments": ["model", "cost", "balance"],
-  "prices_per_million_tokens": {
-    "_default": { "cache_hit": 0.2, "cache_miss": 2.0, "output": 3.0 },
-    "deepseek/deepseek-flash": { "cache_hit": 0.2, "cache_miss": 2.0, "output": 3.0 },
-    "deepseek/deepseek-v4-flash": { "cache_hit": 0.2, "cache_miss": 2.0, "output": 3.0 },
-    "deepseek/deepseek-v4-pro": { "cache_hit": 0.2, "cache_miss": 2.0, "output": 3.0 },
-    "deepseek/deepseek-v4-flash-vision-exp": { "cache_hit": 0.2, "cache_miss": 2.0, "output": 3.0 }
+  "prices_per_million_tokens_usd": {
+    "_default": {
+      "peak": { "cache_hit": 0.006, "cache_miss": 0.3, "output": 1.2 },
+      "off_peak": { "cache_hit": 0.003, "cache_miss": 0.15, "output": 0.6 }
+    },
+    "deepseek/deepseek-flash": {
+      "peak": { "cache_hit": 0.006, "cache_miss": 0.3, "output": 1.2 },
+      "off_peak": { "cache_hit": 0.003, "cache_miss": 0.15, "output": 0.6 }
+    },
+    "deepseek/deepseek-v4-flash": {
+      "peak": { "cache_hit": 0.006, "cache_miss": 0.3, "output": 1.2 },
+      "off_peak": { "cache_hit": 0.003, "cache_miss": 0.15, "output": 0.6 }
+    },
+    "deepseek/deepseek-v4-flash-vision-exp": {
+      "peak": { "cache_hit": 0.006, "cache_miss": 0.3, "output": 1.2 },
+      "off_peak": { "cache_hit": 0.003, "cache_miss": 0.15, "output": 0.6 }
+    },
+    "deepseek/deepseek-v4-pro": {
+      "peak": { "cache_hit": 0.044, "cache_miss": 1.32, "output": 3.96 },
+      "off_peak": { "cache_hit": 0.022, "cache_miss": 0.66, "output": 1.98 }
+    }
   }
 }
